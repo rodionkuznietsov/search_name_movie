@@ -83,23 +83,60 @@ struct VisualMatches {
     title: String
 }
 
-async fn send_message(chat_id: u64, text: String, reply_markup: bool, client: Client, keyboard: Option<Value>) {
-    let mut url = format!("https://api.telegram.org/bot{}/sendMessage?parse_mode=HTML&chat_id={}&text={}", API_BOT_TOKEN, chat_id, text); 
-    
-    if reply_markup {
-        if let Some(keyboard) = keyboard {
-            url = format!("https://api.telegram.org/bot{}/sendMessage?chat_id={}&text={}&reply_markup={}", API_BOT_TOKEN, chat_id, text, keyboard); 
+async fn send_message(chat_id: u64, text: String, reply_markup: bool, client: Client, keyboard: Option<Value>, divide_text: bool) {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    if divide_text {
+        // We divide the text into parts
+        let mut end = 20;
+        let parts: Vec<&str> = text.split("%0A").collect();
+
+        let mut jj = false;
+
+        let mut text = String::new();
+        for (i, str) in parts.iter().enumerate() {
+            text.push_str(&format!("{}%0A", str));
+
+            if i == end {
+                jj = true;
+                // println!("{text}");
+
+                let mut url = format!("https://api.telegram.org/bot{}/sendMessage?parse_mode=HTML&chat_id={}&text={}", API_BOT_TOKEN, chat_id, text); 
+        
+                if reply_markup {
+                    if let Some(ref keyboard) = keyboard {
+                        url = format!("https://api.telegram.org/bot{}/sendMessage?chat_id={}&text={}&reply_markup={}", API_BOT_TOKEN, chat_id, text, keyboard); 
+                    }
+                }
+
+                let response = client.get(url)
+                    .send()
+                    .await
+                    .unwrap();
+
+                println!("Status: {}", response.status());
+                
+                text.clear(); // Clear old text
+                end += 10;
+                // tokio::time::sleep(Duration::from_millis(300)).await;
+            }
         }
+    } else {
+        let mut url = format!("https://api.telegram.org/bot{}/sendMessage?parse_mode=HTML&chat_id={}&text={}", API_BOT_TOKEN, chat_id, text); 
+
+        if reply_markup {
+            if let Some(ref keyboard) = keyboard {
+                url = format!("https://api.telegram.org/bot{}/sendMessage?chat_id={}&text={}&reply_markup={}", API_BOT_TOKEN, chat_id, text, keyboard); 
+            }
+        }
+
+        let response = client.get(url)
+            .send()
+            .await
+            .unwrap();
+
+        println!("Status: {}", response.status());
     }
-
-    println!("{}", url);
-
-    let response = client.get(url)
-        .send()
-        .await
-        .unwrap();
-
-    // println!("Status: {}", response.status())
 }
 
 async fn get_updates() {
@@ -127,11 +164,6 @@ async fn get_updates() {
         let chat_id = result.message.chat.get_id();
         if chat_id > 0 {
             let command = result.message.get_command();
-            // println!();
-            // println!("last_update_id: {}", last_update_id);
-            // println!("chat_id: {}", chat_id);
-            // println!("command: {}", command);
-            // println!();
 
             if command == "/start" {
                 let keyboard = json!(
@@ -143,11 +175,11 @@ async fn get_updates() {
                 );
 
                 let text = "Ещё раз, привет, что будем делать?".to_string();
-                send_message(chat_id, text, true, client.clone(), Some(keyboard)).await;
+                send_message(chat_id, text, true, client.clone(), Some(keyboard), false).await;
             }
             else if command == "Найти названия фильма/сериала" {
                 let text = "Отправьте мне одно, желательно несколько фото, чтобы я смог по ним найти имя фильма/сериала.".to_string();
-                send_message(chat_id, text, false, client.clone(), None).await;
+                send_message(chat_id, text, false, client.clone(), None, false).await;
             } 
             else {
                 let mut min_width: u64 = 0;
@@ -184,33 +216,15 @@ async fn get_updates() {
                         .unwrap();
 
                     let google_lens_json: GoogleLensApiResponse = google_lens_response.json().await.unwrap();
-
-                    // let titles:DashSet<String> = DashSet::new();
-                
                     let mut text = String::new();
 
                     for (i, visual_matches) in google_lens_json.visual_matches.iter().enumerate() {
                         let title = visual_matches.title.clone();
-
-                        // println!("Найденное предположение:");
-                        // println!("{}", title)
-
-                        // if !titles.contains(&title) {
-                        //     titles.insert(title);
-                        // }
-
                         text.push_str(&format!("{}: {}%0A%0A", i + 1, title));
                     }
 
                     text = format!("<b>Нашел {} совпадений</b> %0A%0A{}", google_lens_json.visual_matches.len(), text);
-
-                    println!("{}", text);
-
-                    send_message(chat_id,  text, false, client, None).await;
-
-                    // if !titles.is_empty() {
-                    //     let text = format!("{:?}", titles);
-                    // }
+                    send_message(chat_id,  text, false, client, None, true).await;
                 }
 
                 return;
