@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 const API_BOT_TOKEN: &str = "8425753701:AAHca7QlAtCPgl6J_os_nLUyELRDlfKSD60";
 const SERP_API_GOOGLE_LENS: &str = "aaf525af5fca13fd06b57a8e3f382d1b3f5f1ce6ed07621880cf91dbab44d393";
 
+const SPACE: &str = "%0A";
+
 #[derive(Debug, Default, Deserialize)]
 struct ApiResponse {
     #[serde(default)]
@@ -89,13 +91,13 @@ async fn send_message(chat_id: u64, text: String, reply_markup: bool, client: Cl
     if divide_text {
         // We divide the text into parts
         let mut end = 20;
-        let parts: Vec<&str> = text.split("%0A").collect();
+        let parts: Vec<&str> = text.split(&format!("{}", SPACE)).collect();
 
         let mut jj = false;
 
         let mut text = String::new();
         for (i, str) in parts.iter().enumerate() {
-            text.push_str(&format!("{}%0A", str));
+            text.push_str(&format!("{}{}", str, SPACE));
 
             if i == end {
                 jj = true;
@@ -139,7 +141,11 @@ async fn send_message(chat_id: u64, text: String, reply_markup: bool, client: Cl
     }
 }
 
-async fn get_updates() {
+async fn search_keyword() {
+
+}
+
+async fn get_updates() -> Result<(), reqwest::Error>{
 
     let offset = fs::read_to_string("./src/offset.txt").await.unwrap();
     let url = format!("https://api.telegram.org/bot{}/getUpdates?offset={}", API_BOT_TOKEN, offset);
@@ -147,10 +153,11 @@ async fn get_updates() {
     let client = reqwest::Client::new();
     let response = client.get(url)
         .send()
-        .await.unwrap();
-    let json: ApiResponse = response.json().await.unwrap();
+        .await?;
+    let json: ApiResponse = response.json().await?;
 
     for result in json.result {
+        let client = client.clone();
         let next_update_id = result.update_id + 1;
 
         let mut offset_file = OpenOptions::new()
@@ -202,8 +209,7 @@ async fn get_updates() {
 
                     let response = client.get(url)
                         .send()
-                        .await
-                        .unwrap();
+                        .await?;
 
                     let json: ApiResponse2 = response.json().await.unwrap();
                     let photo_url = format!("https://api.telegram.org/file/bot{}/{}", API_BOT_TOKEN, json.result.file_path);
@@ -212,25 +218,24 @@ async fn get_updates() {
                     
                     let google_lens_response = client.get(google_lens_url)
                         .send()
-                        .await
-                        .unwrap();
+                        .await?;
 
                     let google_lens_json: GoogleLensApiResponse = google_lens_response.json().await.unwrap();
                     let mut text = String::new();
 
                     for (i, visual_matches) in google_lens_json.visual_matches.iter().enumerate() {
                         let title = visual_matches.title.clone();
-                        text.push_str(&format!("{}: {}%0A%0A", i + 1, title));
+                        text.push_str(&format!("{}: {}{}{}", i + 1, title, SPACE, SPACE));
                     }
 
-                    text = format!("<b>Нашел {} совпадений</b> %0A%0A{}", google_lens_json.visual_matches.len(), text);
+                    text = format!("<b>Нашел {} совпадений</b> {}{}{}", google_lens_json.visual_matches.len(), SPACE, SPACE, text);
                     send_message(chat_id,  text, false, client, None, true).await;
                 }
-
-                return;
             }
         }
     }
+
+    Ok(())
 
 }
 
@@ -239,7 +244,7 @@ async fn main() {
     // get_updates().await;
 
     loop {
-        get_updates().await;
+        get_updates().await.expect("Ошибка при получении новых обновлениях");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
