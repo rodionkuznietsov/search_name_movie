@@ -1,12 +1,15 @@
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
+use heck::ToTitleCase;
 use tokio::{self, fs};
-use serde::{ser, Deserialize};
+use serde::{de, Deserialize};
 use reqwest::{self, Client};
-use std::{default::Default, fs::{File, OpenOptions}, io::Write, time::Duration};
+use std::{default::{self, Default}, fs::OpenOptions, io::Write, time::Duration};
 use serde_json::{json, Value};
+use pyo3::{types::{PyAnyMethods, PyModule}, PyResult, Python};
+use std::ffi::CString;
 
-const API_BOT_TOKEN: &str = "8425753701:AAHca7QlAtCPgl6J_os_nLUyELRDlfKSD60";
-const SERP_API_GOOGLE_LENS: &str = "aaf525af5fca13fd06b57a8e3f382d1b3f5f1ce6ed07621880cf91dbab44d393";
+const API_BOT_TOKEN: &str = "API_KEY";
+const SERP_API_GOOGLE_LENS: &str = "API_KEY";
 
 const SPACE: &str = "%0A";
 
@@ -48,11 +51,10 @@ struct Message {
 
 #[derive(Debug, Default, Deserialize)]
 struct PhotoResponse {
+    #[serde(default)]
     file_id: String,
-    file_unique_id: String,
-    file_size: u64,
+    #[serde(default)]
     width: u64,
-    height: u64
 }
 
 impl Message {
@@ -85,64 +87,127 @@ struct VisualMatches {
     title: String
 }
 
-async fn send_message(chat_id: u64, text: String, reply_markup: bool, client: Client, keyboard: Option<Value>, divide_text: bool) {
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    if divide_text {
-        // We divide the text into parts
-        let mut end = 20;
-        let parts: Vec<&str> = text.split(&format!("{}", SPACE)).collect();
-
-        let mut jj = false;
-
-        let mut text = String::new();
-        for (i, str) in parts.iter().enumerate() {
-            text.push_str(&format!("{}{}", str, SPACE));
-
-            if i == end {
-                jj = true;
-                // println!("{text}");
-
-                let mut url = format!("https://api.telegram.org/bot{}/sendMessage?parse_mode=HTML&chat_id={}&text={}", API_BOT_TOKEN, chat_id, text); 
-        
-                if reply_markup {
-                    if let Some(ref keyboard) = keyboard {
-                        url = format!("https://api.telegram.org/bot{}/sendMessage?chat_id={}&text={}&reply_markup={}", API_BOT_TOKEN, chat_id, text, keyboard); 
-                    }
-                }
-
-                let response = client.get(url)
-                    .send()
-                    .await
-                    .unwrap();
-
-                println!("Status: {}", response.status());
-                
-                text.clear(); // Clear old text
-                end += 10;
-                // tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-        }
-    } else {
-        let mut url = format!("https://api.telegram.org/bot{}/sendMessage?parse_mode=HTML&chat_id={}&text={}", API_BOT_TOKEN, chat_id, text); 
-
-        if reply_markup {
-            if let Some(ref keyboard) = keyboard {
-                url = format!("https://api.telegram.org/bot{}/sendMessage?chat_id={}&text={}&reply_markup={}", API_BOT_TOKEN, chat_id, text, keyboard); 
-            }
-        }
-
-        let response = client.get(url)
-            .send()
-            .await
-            .unwrap();
-
-        println!("Status: {}", response.status());
-    }
+#[derive(Debug, Default, Deserialize)]
+struct MovieResponse {
+    #[serde(default)]
+    knowledge_graph: KnowledgeGraph
 }
 
-async fn search_keyword() {
+#[derive(Debug, Default, Deserialize)]
+struct KnowledgeGraph {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    movie: Option<String>
+}
 
+async fn send_message(chat_id: u64, text: String, reply_markup: bool, client: Client, keyboard: Option<Value>) {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut url = format!("https://api.telegram.org/bot{}/sendMessage?parse_mode=HTML&chat_id={}&text={}", API_BOT_TOKEN, chat_id, text); 
+
+    if reply_markup {
+        if let Some(ref keyboard) = keyboard {
+            url = format!("https://api.telegram.org/bot{}/sendMessage?chat_id={}&text={}&reply_markup={}", API_BOT_TOKEN, chat_id, text, keyboard); 
+        }
+    }
+
+    let response = client.get(url)
+        .send()
+        .await
+        .unwrap();
+
+    println!("Status: {}", response.status());
+}
+
+async fn search_keyword(text: String) -> PyResult<String> {
+
+    pyo3::prepare_freethreaded_python();
+
+    let filename = CString::new("keywords_ai.py").unwrap();
+    let module_name = CString::new("keywords_ai").unwrap();
+    let path: CString = CString::new(include_str!("scripts/python/keywords_ai.py")).unwrap();
+    
+    let repeated_words: DashMap<String, u32> = DashMap::new();
+
+    let result: PyResult<String> = tokio::task::spawn_blocking(move || {
+        Python::with_gil(|py| {
+            let p_script = PyModule::from_code(
+                py, 
+                path.as_c_str(), 
+                filename.as_c_str(), 
+                module_name.as_c_str()
+            )?;
+
+            // Список текстов
+            let texts: Vec<&str> = text.split(&format!("{}", SPACE)).collect();
+
+            let results: Vec<Vec<String>> = p_script
+                .getattr("extract_keywords")?
+                .call1((texts,))?
+                .extract()?;
+
+            let mut keyword = String::new();
+            
+            for results in results {
+                for string in results {
+                    let string = string.clone().to_lowercase();
+                    let string = string.trim_end_matches("youtube",).to_string();
+                    let string = string.trim_end_matches("wiki",).to_string();
+                    let string = string.trim_end_matches("season",).to_string();
+                    let string = string.trim_end_matches("imdb",).to_string();
+                    let string = string.trim_end_matches("'s",).to_string();
+                    let string = string.trim_end_matches(&['-', ' ']).to_string();
+
+                    if let Some(mut value) = repeated_words.get_mut(&string) {
+                        *value += 1; 
+                    } else {
+                        repeated_words.insert(string, 1);
+                    }
+                }
+            }
+
+            if let Some((key, value)) = repeated_words
+                .iter()
+                .max_by_key(|entry| *entry.value())
+                .map(|entry| (entry.key().clone(), *entry.value()))
+            {
+                keyword = key.to_title_case();
+            }
+
+            Ok(keyword)
+        })
+    })
+    .await.unwrap();
+
+    result
+}
+    
+async fn get_film_name(keyword: String, client: Client) -> Result<String, reqwest::Error> {
+    let url = format!("https://serpapi.com/search.json?engine=google&q={} movie&api_key={}", keyword, SERP_API_GOOGLE_LENS);
+
+    println!("{url}");
+
+    let response = client.get(url)
+        .send()
+        .await?;
+
+    println!("Status: {}", response.status());
+        
+    let movie_json: MovieResponse = response.json().await?;
+
+    let mut movie_name = String::new();
+
+    if movie_json.knowledge_graph.title == keyword {
+        if let Some(movie) = movie_json.knowledge_graph.movie {
+            movie_name = movie
+        } else {
+            movie_name = movie_json.knowledge_graph.title
+        }
+    } else {
+        movie_name = movie_json.knowledge_graph.title
+    }
+
+    Ok(movie_name)
 }
 
 async fn get_updates() -> Result<(), reqwest::Error>{
@@ -182,11 +247,11 @@ async fn get_updates() -> Result<(), reqwest::Error>{
                 );
 
                 let text = "Ещё раз, привет, что будем делать?".to_string();
-                send_message(chat_id, text, true, client.clone(), Some(keyboard), false).await;
+                send_message(chat_id, text, true, client.clone(), Some(keyboard)).await;
             }
             else if command == "Найти названия фильма/сериала" {
                 let text = "Отправьте мне одно, желательно несколько фото, чтобы я смог по ним найти имя фильма/сериала.".to_string();
-                send_message(chat_id, text, false, client.clone(), None, false).await;
+                send_message(chat_id, text, false, client.clone(), None).await;
             } 
             else {
                 let mut min_width: u64 = 0;
@@ -228,8 +293,11 @@ async fn get_updates() -> Result<(), reqwest::Error>{
                         text.push_str(&format!("{}: {}{}{}", i + 1, title, SPACE, SPACE));
                     }
 
-                    text = format!("<b>Нашел {} совпадений</b> {}{}{}", google_lens_json.visual_matches.len(), SPACE, SPACE, text);
-                    send_message(chat_id,  text, false, client, None, true).await;
+                    // text = format!("<b>Нашел {} совпадений</b> {}{}{}", google_lens_json.visual_matches.len(), SPACE, SPACE, text);
+                    let keyword = search_keyword(text).await.expect("Не удалось получить ключивое слова");
+                    let movie_name = get_film_name(keyword, client.clone()).await.expect("Не удалось получить имя фильма");
+
+                    send_message(chat_id,  movie_name, false, client.clone(), None).await;
                 }
             }
         }
